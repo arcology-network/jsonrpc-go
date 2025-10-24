@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
+	"log"
 	"net/http"
 	"reflect"
 )
@@ -46,18 +47,18 @@ type Next func(ctx context.Context, params interface{}) (interface{}, error)
 //
 // For example, you might create a logging middleware that looks like:
 //
-//  func LoggingMiddleware(logger *logger.Logger) Middleware {
-//      return func (next jsonrpc.Next) jsonrpc.Next {
-//          return func(ctx context.Context, params interface{}) (interface{}, error) {
-//              method := jsonrpc.MethodFromContext(ctx)
-//              start := time.Now()
-//              defer func() {
-//                  logger.Printf("%s (%v)\n", method, time.Since(start))
-//              }()
-//              return next(ctx, params)
-//          }
-//      }
-//  }
+//	func LoggingMiddleware(logger *logger.Logger) Middleware {
+//	    return func (next jsonrpc.Next) jsonrpc.Next {
+//	        return func(ctx context.Context, params interface{}) (interface{}, error) {
+//	            method := jsonrpc.MethodFromContext(ctx)
+//	            start := time.Now()
+//	            defer func() {
+//	                logger.Printf("%s (%v)\n", method, time.Since(start))
+//	            }()
+//	            return next(ctx, params)
+//	        }
+//	    }
+//	}
 type Middleware func(Next) Next
 
 // Methods represents a map of RPC methods.
@@ -92,10 +93,11 @@ func (h *Handler) Use(middleware ...Middleware) { h.root.Use(middleware...) }
 // Register registers the set of methods owned by this group.
 //
 // For example:
-//  g.Register(Methods{
-//      "Login":   loginMethod,
-//      "GetUser": getUserMethod,
-//  })
+//
+//	g.Register(Methods{
+//	    "Login":   loginMethod,
+//	    "GetUser": getUserMethod,
+//	})
 func (g *Group) Register(methods Methods) {
 	for name, m := range methods {
 		if _, ok := g.server.methods[name]; ok {
@@ -108,10 +110,11 @@ func (g *Group) Register(methods Methods) {
 // Register registers the set of methods owned by this group.
 //
 // For example:
-//  g.Register(Methods{
-//      "Login":   loginMethod,
-//      "GetUser": getUserMethod,
-//  })
+//
+//	g.Register(Methods{
+//	    "Login":   loginMethod,
+//	    "GetUser": getUserMethod,
+//	})
 func (h *Handler) Register(methods Methods) { h.root.Register(methods) }
 
 type request struct {
@@ -121,9 +124,25 @@ type request struct {
 }
 
 type response struct {
-	Result interface{} `json:"result,omitempty"`
-	Error  *RPCError   `json:"error,omitempty"`
-	ID     interface{} `json:"id"`
+	Result  interface{}
+	Error   *RPCError
+	ID      interface{}
+	JsonRPC string
+}
+
+func (r response) MarshalJSON() ([]byte, error) {
+	m := map[string]interface{}{
+		"jsonrpc": r.JsonRPC,
+		"id":      r.ID,
+	}
+
+	if r.Error != nil {
+		m["error"] = r.Error
+	} else {
+		m["result"] = r.Result
+	}
+
+	return json.Marshal(m)
 }
 
 // M is a shorthand for map[string]interface{}. Responses from the server may be
@@ -151,6 +170,24 @@ func RequestFromContext(ctx context.Context) *http.Request {
 	return r
 }
 
+func logRequest(reqs []*request) {
+	jsondata, err := json.Marshal(reqs)
+	if err != nil {
+		fmt.Println("json.marshal failed, err:", err)
+		return
+	}
+	log.Printf("request %v\n", string(jsondata))
+}
+func logResponse(resps []*response) {
+	jsondata, err := json.Marshal(resps)
+	if err != nil {
+		fmt.Println("json.marshal failed, err:", err)
+		return
+	}
+
+	log.Printf("response %v\n", string(jsondata))
+}
+
 // ServeHTTP implements the http.Handler interface.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := context.WithValue(r.Context(), contextKeyRequest, r)
@@ -162,14 +199,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-
+	logRequest(requests)
 	responses := make([]*response, 0, len(requests))
 	for _, req := range requests {
 		result, err := h.invokeMethod(ctx, req)
 		responses = append(responses, &response{
-			ID:     req.ID,
-			Result: result,
-			Error:  translateError(err),
+			ID:      req.ID,
+			Result:  result,
+			Error:   translateError(err),
+			JsonRPC: "2.0",
 		})
 	}
 
@@ -180,7 +218,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-
+	logResponse(responses)
 	if len(requests) == 1 {
 		sendJSON(w, 200, responses[0])
 	} else {
